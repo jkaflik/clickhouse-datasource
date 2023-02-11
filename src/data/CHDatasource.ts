@@ -4,18 +4,23 @@ import {
   DataQueryRequest,
   DataQueryResponse,
   DataSourceInstanceSettings,
+  DataSourceWithSupplementaryQueriesSupport,
   MetricFindValue,
   ScopedVars,
   VariableModel,
+  SupplementaryQueryType,
   vectorator,
 } from '@grafana/data';
 import { DataSourceWithBackend, getTemplateSrv } from '@grafana/runtime';
+import { queryLogsVolume } from 'app/core/logsModel';
+import { getLogLevelFromKey } from '../../../features/logs/utils';
+
 import { Observable } from 'rxjs';
 import { CHConfig, CHQuery, FullField, QueryType } from '../types';
 import { AdHocFilter } from './adHocFilter';
-import { isString, isEmpty } from 'lodash';
+import { cloneDeep, isString, isEmpty } from 'lodash';
 
-export class Datasource extends DataSourceWithBackend<CHQuery, CHConfig> {
+export class Datasource extends DataSourceWithBackend<CHQuery, CHConfig> implements DataSourceWithSupplementaryQueriesSupport<CHQuery> {
   // This enables default annotation support for 7.2+
   annotations = {};
   settings: DataSourceInstanceSettings<CHConfig>;
@@ -28,6 +33,54 @@ export class Datasource extends DataSourceWithBackend<CHQuery, CHConfig> {
     super(instanceSettings);
     this.settings = instanceSettings;
     this.adHocFilter = new AdHocFilter();
+  }
+
+  getDataProvider(
+      type: SupplementaryQueryType,
+      request: DataQueryRequest<CHQuery>
+  ): Observable<DataQueryResponse> | undefined {
+    if (!this.getSupportedSupplementaryQueryTypes().includes(type)) {
+      return undefined;
+    }
+    switch (type) {
+      case SupplementaryQueryType.LogsVolume:
+        return this.getLogsVolumeDataProvider(request);
+      default:
+        return undefined;
+    }
+  }
+
+  getSupportedSupplementaryQueryTypes(): SupplementaryQueryType[] {
+    return [SupplementaryQueryType.LogsVolume];
+  }
+
+  getSupplementaryQuery(type: SupplementaryQueryType, query: CHQuery): CHQuery | undefined {
+    if (!this.getSupportedSupplementaryQueryTypes().includes(type)) {
+      return undefined;
+    }
+
+    // todo transform original query into count aggregated group by date query
+  }
+
+  getLogsVolumeDataProvider(request: DataQueryRequest<CHQuery>): Observable<DataQueryResponse> | undefined {
+    const logsVolumeRequest = cloneDeep(request);
+    const targets = logsVolumeRequest.targets
+        .map((target) => this.getSupplementaryQuery(SupplementaryQueryType.LogsVolume, target))
+        .filter((query): query is CHQuery => !!query);
+
+    if (!targets.length) {
+      return undefined;
+    }
+
+    return queryLogsVolume(
+        this,
+        { ...logsVolumeRequest, targets },
+        {
+          range: request.range,
+          targets: request.targets,
+          extractLevel: (dataFrame) => getLogLevelFromKey(dataFrame.name || ''),
+        }
+    );
   }
 
   async metricFindQuery(query: CHQuery | string, options: any) {
